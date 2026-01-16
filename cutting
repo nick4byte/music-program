@@ -1,0 +1,58 @@
+import os
+import moviepy as mp
+# 根據你的版本選擇匯入方式
+try:
+    from moviepy import VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip
+    VERSION = 2
+except ImportError:
+    from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, CompositeAudioClip
+    VERSION = 1
+
+def create_duet_dataset():
+    # 1. 路徑設定
+    v1 = "/Users/nick/Downloads/test_video.mp4"
+    a1 = "/Users/nick/Downloads/test_video.wav"
+    v2 = "/Users/nick/Downloads/test_video2.mp4"
+    a2 = "/Users/nick/Downloads/test_video2.wav"
+    output_dir = '/Users/nick/Desktop/music program/dataset'
+    output_file = os.path.join(output_dir, "final_duet.mp4")
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # 2. 載入 clip
+    c1 = VideoFileClip(v1)
+    au1 = AudioFileClip(a1)
+    c2 = VideoFileClip(v2)
+    au2 = AudioFileClip(a2)
+
+    # 3. 處理畫面與音訊 (相容 v1/v2)
+    target_h = 720
+    if VERSION == 2:
+        c1 = c1.resized(height=target_h).with_position((0, 0))
+        c2 = c2.resized(height=target_h).with_position((c1.w, 0))
+        mixed_audio = CompositeAudioClip([au1.with_volume_scaled(0.5), au2.with_volume_scaled(0.5)])
+    else:
+        c1 = c1.resize(height=target_h).set_position((0, 0))
+        c2 = c2.resize(height=target_h).set_position((c1.w, 0))
+        mixed_audio = CompositeAudioClip([au1.volumex(0.5), au2.volumex(0.5)])
+
+    # 4. 重要：手動指定 size 以避開 NumPy 2.0 的 amax 計算錯誤
+    total_width = c1.w + c2.w
+    final_video = CompositeVideoClip([c1, c2], size=(total_width, target_h))
+
+    # 5. 合併音軌並輸出
+    print(f"🚀 正在合成輸出至: {output_file}")
+    if VERSION == 2:
+        final_video = final_video.with_audio(mixed_audio)
+    else:
+        final_video = final_video.set_audio(mixed_audio)
+
+    final_video.write_videofile(output_file, fps=30, codec="libx264", audio_codec="aac")
+
+    # 關閉資源
+    c1.close(); c2.close(); au1.close(); au2.close()
+    print("✅ 合成成功！")
+
+if __name__ == "__main__":
+    create_duet_dataset()
