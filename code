@@ -1,0 +1,147 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import librosa
+import soundfile as sf
+import json
+import os
+
+
+# 之後使用時就不用寫 .solutions
+mp_hands = mp.solutions.hands # 這裡報錯
+hands = mp_hands.Hands(max_num_hands=4, min_detection_confidence=0.7, min_tracking_confidence=0.65)
+
+
+def extract_and_struct_data(results, prev_frame_data=None):
+    """
+    修改點 1：計算位移與運動速度
+    每個關鍵點輸出：[x, y, z, dx, dy, dz, V] 共 7 維
+    """
+    LEFT_HAND_POINTS = 8
+    RIGHT_HAND_POINTS = 3
+    
+    frame_struct = {
+        "A_Left": np.zeros((LEFT_HAND_POINTS, 7)),
+        "A_Right": np.zeros((RIGHT_HAND_POINTS, 7)),
+        "B_Left": np.zeros((LEFT_HAND_POINTS, 7)),
+        "B_Right": np.zeros((RIGHT_HAND_POINTS, 7))
+    }
+
+    if not results.multi_hand_landmarks:
+        return frame_struct
+
+    temp_hands = []
+    for res_lms, res_label in zip(results.multi_hand_landmarks, results.multi_handedness):
+        label = res_label.classification[0].label # 'Left' or 'Right'
+        wrist = res_lms.landmark[0]
+        
+        # 依照你的設定：左手 8 點，右手 3 點
+        indices = [5, 8, 9, 12, 13, 16, 17, 20] if label == 'Left' else [4, 8, 0]
+        coords = []
+        for i in indices:
+            l = res_lms.landmark[i]
+            # 座標歸一化 (扣除手腕)
+            coords.append([l.x - wrist.x, l.y - wrist.y, l.z - wrist.z])
+        
+        temp_hands.append({'label': label, 'coords': np.array(coords), 'x': wrist.x})
+
+    # 判定 A/B (左側為 A，右側為 B)
+    temp_hands = sorted(temp_hands, key=lambda h: h['x'])
+    for hand in temp_hands:
+        is_person_A = hand['x'] < 0.5
+        prefix = "A_" if is_person_A else "B_"
+        key = prefix + hand['label']
+        
+        current_coords = hand['coords'] # [Points, 3]
+        motion_data = np.zeros((current_coords.shape[0], 4)) # [dx, dy, dz, V]
+        
+        # 計算位移向量與速度 (對齊 AVPC 邏輯)
+        if prev_frame_data is not None and key in prev_frame_data:
+            prev_coords = prev_frame_data[key][:, :3] # 取前一幀的 (x,y,z)
+            if not np.all(prev_coords == 0): 
+                diff = current_coords - prev_coords
+                velocity = np.sqrt(np.sum(diff**2, axis=1, keepdims=True))
+                motion_data = np.concatenate([diff, velocity], axis=1)
+        
+        # 最終特徵：[x, y, z, dx, dy, dz, V]
+        frame_struct[key] = np.concatenate([current_coords, motion_data], axis=1)
+        
+    return frame_struct
+
+def video_audio_process(video_path, audio_A_path, audio_B_path=None, output_prefix="guitar_dataset"):
+    """
+    修改點 2：音訊輸出邏輯。
+    如果是訓練集，需傳入分開的 A, B 音軌；如果是測試，B 可為 None。
+    """
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    target_sr = 44100
+    
+    # 載入音軌
+    audio_A, _ = librosa.load(audio_A_path, sr=target_sr, mono=True)
+    audio_B = None
+    if audio_B_path:
+        audio_B, _ = librosa.load(audio_B_path, sr=target_sr, mono=True)
+
+    samples_per_frame = target_sr / fps
+    sync_index = [int(np.round(i * samples_per_frame)) for i in range(total_frames + 1)]
+    
+    data_storage = { "A_Left": [], "A_Right": [], "B_Left": [], "B_Right": [] }
+    prev_frame_data = None
+    actual_processed_frames = 0
+
+    print(f"開始處理... FPS: {fps}, 預計幀數: {total_frames}")
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret: break
+        
+        # 註：建議確認是否需要 flip，若影片已正常則不需 flip
+        results = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        
+        # 傳入 prev_frame_data 計算運動速度
+        frame_data = extract_and_struct_data(results, prev_frame_data)
+        
+        for key in data_storage:
+            data_storage[key].append(frame_data[key])
+            
+        prev_frame_data = frame_data # 更新前一幀
+        actual_processed_frames += 1
+        
+        if actual_processed_frames % 100 == 0:
+            print(f"進度: {actual_processed_frames}/{total_frames}")
+
+    cap.release()
+
+    # 儲存 Wav (修改點 2 延續)
+    sf.write(f"{output_prefix}_A.wav", audio_A, target_sr)
+    if audio_B is not None:
+        sf.write(f"{output_prefix}_B.wav", audio_B, target_sr)
+
+    # 儲存 NPY
+    for key in data_storage:
+        np.save(f"{output_prefix}_{key}.npy", np.array(data_storage[key]))
+
+    # 修改點 3：增加 JSON 內容 (用於 Cross-Attention 的特徵維度定義)
+    sync_data = {
+        "metadata": {
+            "video_source": video_path,
+            "feature_description": "x, y, z, dx, dy, dz, velocity",
+            "num_landmarks_left": 8,
+            "num_landmarks_right": 3
+        },
+        "sync": {
+            "fps": fps,
+            "sample_rate": target_sr,
+            "total_frames": actual_processed_frames,
+            "sync_index": sync_index[:actual_processed_frames]
+        }
+    }
+    
+    with open(f"{output_prefix}_sync.json", 'w') as f:
+        json.dump(sync_data, f, indent=4)
+
+    print(f"處理完成！輸出前綴: {output_prefix}")
+    
+    
