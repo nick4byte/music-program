@@ -1,3 +1,13 @@
+視覺導引吉他音訊分離 - 預處理模組
+支援: 拼接影片、單一寬畫面、上下拼接、任意站位
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+單人吉他手部特徵提取 - 改進版
+"""
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -5,143 +15,283 @@ import librosa
 import soundfile as sf
 import json
 import os
+from collections import deque
+from pathlib import Path
+
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    max_num_hands=2, 
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+class HandSmoothingFilter:
+    """時間平滑濾波器"""
+    def __init__(self, window_size=5):
+        self.window_size = window_size
+        self.buffer = deque(maxlen=window_size)
+
+    def update(self, coords):
+        """更新並返回平滑後的座標"""
+        self.buffer.append(coords)
+        if len(self.buffer) < 3:  # 前 3 幀直接返回原始值
+            return coords
+        return np.median(np.array(self.buffer), axis=0)
+    
+    def reset(self):
+        """重置濾波器"""
+        self.buffer.clear()
 
 
-# 之後使用時就不用寫 .solutions
-mp_hands = mp.solutions.hands # 這裡報錯
-hands = mp_hands.Hands(max_num_hands=4, min_detection_confidence=0.7, min_tracking_confidence=0.65)
-
-
-def extract_and_struct_data(results, prev_frame_data=None):
+def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
     """
-    修改點 1：計算位移與運動速度
-    每個關鍵點輸出：[x, y, z, dx, dy, dz, V] 共 7 維
+    改進版: 用 X 座標判斷實際的左右手
     """
-    LEFT_HAND_POINTS = 8
-    RIGHT_HAND_POINTS = 3
+    LEFT_INDICES = [5, 8, 9, 12, 13, 16, 17, 20]
+    RIGHT_INDICES = [0, 2, 4, 5, 9]
     
     frame_struct = {
-        "A_Left": np.zeros((LEFT_HAND_POINTS, 7)),
-        "A_Right": np.zeros((RIGHT_HAND_POINTS, 7)),
-        "B_Left": np.zeros((LEFT_HAND_POINTS, 7)),
-        "B_Right": np.zeros((RIGHT_HAND_POINTS, 7))
+        "A_Left": np.zeros((8, 7)),   # 被拍攝者的左手 (畫面右側)
+        "A_Right": np.zeros((5, 7))   # 被拍攝者的右手 (畫面左側)
     }
-
+    
+    if frame_idx % 10 == 0:
+        if not results.multi_hand_landmarks:
+            print(f"  幀 {frame_idx}: ❌ 沒有偵測到任何手")
+        else:
+            print(f"  幀 {frame_idx}: 偵測到 {len(results.multi_hand_landmarks)} 隻手")
+    
     if not results.multi_hand_landmarks:
-        return frame_struct
+        for key in filters:
+            filters[key].reset()
+        return frame_struct, prev_coords_dict
 
-    temp_hands = []
+    detected_hands = []
+    
     for res_lms, res_label in zip(results.multi_hand_landmarks, results.multi_handedness):
-        label = res_label.classification[0].label # 'Left' or 'Right'
+        mp_label = res_label.classification[0].label  # MediaPipe 的標註
+        confidence = res_label.classification[0].score
         wrist = res_lms.landmark[0]
         
-        # 依照你的設定：左手 8 點，右手 3 點
-        indices = [5, 8, 9, 12, 13, 16, 17, 20] if label == 'Left' else [4, 8, 0]
-        coords = []
-        for i in indices:
-            l = res_lms.landmark[i]
-            # 座標歸一化 (扣除手腕)
-            coords.append([l.x - wrist.x, l.y - wrist.y, l.z - wrist.z])
+        detected_hands.append({
+            'mp_label': mp_label,
+            'confidence': confidence,
+            'landmarks': res_lms,
+            'wrist_x': wrist.x,
+            'wrist_y': wrist.y
+        })
+    
+    # === 核心改動: 按 X 座標排序並重新分配 ===
+    detected_hands = sorted(detected_hands, key=lambda h: h['wrist_x'])
+    
+    # Debug 輸出
+    if frame_idx % 10 == 0 and detected_hands:
+        for i, hand in enumerate(detected_hands):
+            print(f"    手 {i}: MP_label={hand['mp_label']}, wrist_x={hand['wrist_x']:.3f}, 信心度={hand['confidence']:.2f}")
+    
+    # === 重新分配邏輯 ===
+    for i, hand_info in enumerate(detected_hands):
+        res_lms = hand_info['landmarks']
+        wrist_x = hand_info['wrist_x']
         
-        temp_hands.append({'label': label, 'coords': np.array(coords), 'x': wrist.x})
-
-    # 判定 A/B (左側為 A，右側為 B)
-    temp_hands = sorted(temp_hands, key=lambda h: h['x'])
-    for hand in temp_hands:
-        is_person_A = hand['x'] < 0.5
-        prefix = "A_" if is_person_A else "B_"
-        key = prefix + hand['label']
+        # 用 X 座標判斷實際的手
+        if wrist_x < 0.4:
+            # 畫面左側 → 被拍攝者的右手 (撥弦手)
+            actual_hand = "Right"
+            indices = RIGHT_INDICES
+        else:
+            # 畫面右側 → 被拍攝者的左手 (按弦手)
+            actual_hand = "Left"
+            indices = LEFT_INDICES
         
-        current_coords = hand['coords'] # [Points, 3]
-        motion_data = np.zeros((current_coords.shape[0], 4)) # [dx, dy, dz, V]
+        key = f"A_{actual_hand}"
         
-        # 計算位移向量與速度 (對齊 AVPC 邏輯)
-        if prev_frame_data is not None and key in prev_frame_data:
-            prev_coords = prev_frame_data[key][:, :3] # 取前一幀的 (x,y,z)
-            if not np.all(prev_coords == 0): 
-                diff = current_coords - prev_coords
+        if frame_idx % 10 == 0:
+            print(f"      → 判定為: {actual_hand} (儲存到 {key})")
+        
+        # 提取座標
+        wrist = res_lms.landmark[0]
+        raw_coords = []
+        for idx in indices:
+            l = res_lms.landmark[idx]
+            raw_coords.append([l.x - wrist.x, l.y - wrist.y, l.z - wrist.z])
+        raw_coords = np.array(raw_coords)
+        if frame_idx % 10 == 0 and raw_coords.any():
+            print(f"      Raw coords sample for {key}: {raw_coords[0]}")  # 印第一行座標確認非零
+        # 平滑處理
+        try:
+            smooth_coords = filters[key].update(raw_coords)
+        except Exception as e:
+            smooth_coords = raw_coords
+        
+        # 計算運動特徵
+        motion_data = np.zeros((smooth_coords.shape[0], 4))
+        if key in prev_coords_dict:
+            try:
+                diff = smooth_coords - prev_coords_dict[key]
                 velocity = np.sqrt(np.sum(diff**2, axis=1, keepdims=True))
                 motion_data = np.concatenate([diff, velocity], axis=1)
+            except Exception as e:
+                pass
         
-        # 最終特徵：[x, y, z, dx, dy, dz, V]
-        frame_struct[key] = np.concatenate([current_coords, motion_data], axis=1)
-        
-    return frame_struct
+        # 組合特徵
+        frame_struct[key] = np.concatenate([smooth_coords, motion_data], axis=1)
+        prev_coords_dict[key] = smooth_coords
+    
+    return frame_struct, prev_coords_dict
 
-def video_audio_process(video_path, audio_A_path, audio_B_path=None, output_prefix="guitar_dataset"):
+
+def video_audio_process(video_path, audio_path, output_prefix=None):
     """
-    修改點 2：音訊輸出邏輯。
-    如果是訓練集，需傳入分開的 A, B 音軌；如果是測試，B 可為 None。
+    單人吉他手部特徵提取主函數
+    
+    Args:
+        video_path: 影片路徑
+        audio_path: 音訊路徑
+        output_prefix: 輸出檔名前綴 (None = 自動從影片檔名取得)
     """
+    
+    # === 自動生成輸出前綴 ===
+    if output_prefix is None:
+        # 從影片路徑提取檔名 (不含副檔名)
+        video_filename = Path(video_path).stem
+        output_prefix = video_filename
+        print(f"📝 自動設定輸出前綴: {output_prefix}")
+    
+    # === 檢查檔案存在 ===
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"影片不存在: {video_path}")
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"音訊不存在: {audio_path}")
+    
+    # === 開啟影片 ===
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"無法開啟影片: {video_path}")
+    
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     target_sr = 44100
     
-    # 載入音軌
-    audio_A, _ = librosa.load(audio_A_path, sr=target_sr, mono=True)
-    audio_B = None
-    if audio_B_path:
-        audio_B, _ = librosa.load(audio_B_path, sr=target_sr, mono=True)
-
-    samples_per_frame = target_sr / fps
-    sync_index = [int(np.round(i * samples_per_frame)) for i in range(total_frames + 1)]
+    print(f"\n🎬 影片資訊:")
+    print(f"   路徑: {video_path}")
+    print(f"   尺寸: {frame_width} x {frame_height}")
+    print(f"   FPS: {fps:.2f}")
+    print(f"   總幀數: {total_frames}")
     
-    data_storage = { "A_Left": [], "A_Right": [], "B_Left": [], "B_Right": [] }
-    prev_frame_data = None
-    actual_processed_frames = 0
-
-    print(f"開始處理... FPS: {fps}, 預計幀數: {total_frames}")
-
+    # === 載入音訊 ===
+    print(f"\n🎵 載入音訊: {audio_path}")
+    audio_full, _ = librosa.load(audio_path, sr=target_sr, mono=True)
+    print(f"   音訊長度: {len(audio_full) / target_sr:.2f} 秒")
+    
+    # === 初始化濾波器 ===
+    filters = {
+        "A_Left": HandSmoothingFilter(window_size=5),
+        "A_Right": HandSmoothingFilter(window_size=5)
+    }
+    
+    data_storage = {"A_Left": [], "A_Right": []}
+    prev_coords_dict = {}
+    processed_frames = 0
+    
+    print(f"\n🎸 開始處理...")
+    
+    # === 逐幀處理 ===
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret: break
+        if not ret:
+            break
         
-        # 註：建議確認是否需要 flip，若影片已正常則不需 flip
+        # MediaPipe 手部偵測
         results = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         
-        # 傳入 prev_frame_data 計算運動速度
-        frame_data = extract_and_struct_data(results, prev_frame_data)
+        # 提取特徵
+        frame_data, prev_coords_dict = extract_and_struct_data(
+            results, 
+            prev_coords_dict, 
+            filters,
+            frame_idx=processed_frames
+        )
         
+        # 儲存資料
         for key in data_storage:
             data_storage[key].append(frame_data[key])
-            
-        prev_frame_data = frame_data # 更新前一幀
-        actual_processed_frames += 1
         
-        if actual_processed_frames % 100 == 0:
-            print(f"進度: {actual_processed_frames}/{total_frames}")
+        processed_frames += 1
+        
+        if processed_frames % 100 == 0:
+            print(f"   進度: {processed_frames}/{total_frames}")
 
     cap.release()
-
-    # 儲存 Wav (修改點 2 延續)
-    sf.write(f"{output_prefix}_A.wav", audio_A, target_sr)
-    if audio_B is not None:
-        sf.write(f"{output_prefix}_B.wav", audio_B, target_sr)
-
-    # 儲存 NPY
+    
+    print(f"\n✅ 影片處理完成: {processed_frames} 幀")
+    # 在 video_audio_process 的最後,儲存前加入:
+    print(f"\n🔍 檢查資料內容:")
     for key in data_storage:
-        np.save(f"{output_prefix}_{key}.npy", np.array(data_storage[key]))
-
-    # 修改點 3：增加 JSON 內容 (用於 Cross-Attention 的特徵維度定義)
+        arr = np.array(data_storage[key])
+        
+        # 檢查是否全為 0
+        if np.all(arr == 0):
+            print(f"   ❌ {key}: 全部為 0!")
+        else:
+            non_zero_frames = np.sum(np.any(arr != 0, axis=(1, 2)))
+            first_non_zero = np.where(np.any(arr != 0, axis=(1, 2)))[0]
+            if len(first_non_zero) > 0:
+                print(f"   ✅ {key}: {non_zero_frames} 幀有資料, 第一個非零幀: {first_non_zero[0]}")
+                # 顯示第一個非零幀的資料
+                sample_data = arr[first_non_zero[0]]
+                print(f"      樣本資料 (第 {first_non_zero[0]} 幀):")
+                print(f"      座標範圍: x=[{sample_data[:, 0].min():.3f}, {sample_data[:, 0].max():.3f}]")
+                print(f"      速度範圍: V=[{sample_data[:, 6].min():.3f}, {sample_data[:, 6].max():.3f}]")
+            else:
+                print(f"   ⚠️ {key}: 有 {non_zero_frames} 幀,但找不到非零幀 (異常)")
+    
+    # === 裁切音訊到實際長度 ===
+    actual_audio_len = int(processed_frames * (target_sr / fps))
+    audio_final = audio_full[:actual_audio_len]
+    
+    # === 儲存音訊 ===
+    audio_output = f"{output_prefix}_A.wav"
+    sf.write(audio_output, audio_final, target_sr)
+    print(f"\n💾 已儲存音訊: {audio_output}")
+    
+    # === 儲存特徵 ===
+    print(f"\n💾 儲存手部特徵...")
+    for key in data_storage:
+        arr = np.array(data_storage[key])
+        npy_output = f"{output_prefix}_{key}.npy"
+        print(f"   Before save {key}: non-zero elements = {np.count_nonzero(arr)}")
+        np.save(npy_output, arr)
+        
+        # 統計有效資料
+        non_zero_frames = np.sum(np.any(arr != 0, axis=(1, 2)))
+        print(f"   {key}: {arr.shape} ({non_zero_frames}/{processed_frames} 幀有資料, {non_zero_frames/processed_frames*100:.1f}%)")
+    
+    # === 儲存同步資訊 ===
     sync_data = {
         "metadata": {
             "video_source": video_path,
-            "feature_description": "x, y, z, dx, dy, dz, velocity",
-            "num_landmarks_left": 8,
-            "num_landmarks_right": 3
-        },
-        "sync": {
-            "fps": fps,
+            "audio_source": audio_path,
+            "video_resolution": f"{frame_width}x{frame_height}",
+            "audio_total_samples": len(audio_final),
             "sample_rate": target_sr,
-            "total_frames": actual_processed_frames,
-            "sync_index": sync_index[:actual_processed_frames]
-        }
+            "fps": fps,
+            "total_frames": processed_frames,
+            "feature_dim": 7,
+            "feature_description": "x, y, z, dx, dy, dz, velocity",
+            "left_hand_points": 8,
+            "right_hand_points": 5
+        },
+        "sync_index": [int(np.round(i * (target_sr / fps))) for i in range(processed_frames)]
     }
     
-    with open(f"{output_prefix}_sync.json", 'w') as f:
-        json.dump(sync_data, f, indent=4)
-
-    print(f"處理完成！輸出前綴: {output_prefix}")
+    sync_output = f"{output_prefix}_sync.json"
+    with open(sync_output, 'w') as f:
+        json.dump(sync_data, f, indent=2)
+    
+    print(f"   同步資訊: {sync_output}")
+    print(f"\n✅ 全部完成! 輸出前綴: {output_prefix}")
     
     
