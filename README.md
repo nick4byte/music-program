@@ -1,6 +1,7 @@
 🎸 視覺導引吉他音訊分離與自動轉錄系統
 Visual-Guided Guitar Audio Separation & Automatic Transcription
 本專案開發了一套基於深度學習的影音處理流水線，旨在透過分析吉他手的雙手運動特徵，實現從混合音訊中精確分離特定吉他的聲音，並進一步自動轉錄為五線譜
+
 🚀 核心功能與進度1. 動作特徵預處理 (process_video.py)
 利用 MediaPipe 實現對單人吉他演奏影片的高精度追蹤：
 雙手點位追蹤：精確提取右手 (5 點) 撥弦與左手 (8 點) 按弦的 3D 座標
@@ -11,6 +12,7 @@ Visual-Guided Guitar Audio Separation & Automatic Transcription
 採用 Mix-and-Separate 訓練策略：
 積木式混合：支援從樣本庫中隨機挑選兩個獨立的吉他樣本 (A & B) 進行即時混合
 隨機裁剪：在訓練時自動從長影片中隨機截取 10 秒 (300 幀) 的片段
+
 📈 技術亮點
 視覺導引 (Visual-Guide)：利用右手撥弦的 Timing (Onset) 與左手按弦的把位 (Pitch) 資訊，輔助音訊分離模型在頻率重疊時仍能精確切分聲音
 原子化設計：所有預處理均以「單人」為單位，訓練時才進行動態混合，極大化數據利用率與模型的泛化能力
