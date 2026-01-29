@@ -8,6 +8,7 @@ Visual-Guided Guitar Audio Separation & Automatic Transcription
 運動特徵工程：每一幀包含 13 個點的(x, y, z)座標、位移及即時運動速度維特徵
 時間平滑化：內建中值濾波器 (Median Filter) 消除偵測抖動，確保速度向量的物理準確性
 音訊同步：自動生成影音同步索引 (Sync Index)，支持不同 FPS 的影片與 44100Hz音訊對齊
+
 2. 動態資料加載器 (data_loader.py)
 採用 Mix-and-Separate 訓練策略：
 積木式混合：支援從樣本庫中隨機挑選兩個獨立的吉他樣本 (A & B) 進行即時混合
