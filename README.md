@@ -4,21 +4,33 @@ Visual-Guided Guitar Audio Separation & Automatic Transcription
 
 🚀 核心功能與進度1. 動作特徵預處理 (process_video.py)
 利用 MediaPipe 實現對單人吉他演奏影片的高精度追蹤：
+
 雙手點位追蹤：精確提取右手 (5 點) 撥弦與左手 (8 點) 按弦的 3D 座標
+
 運動特徵工程：每一幀包含 13 個點的(x, y, z)座標、位移及即時運動速度維特徵
+
 時間平滑化：內建中值濾波器 (Median Filter) 消除偵測抖動，確保速度向量的物理準確性
+
 音訊同步：自動生成影音同步索引 (Sync Index)，支持不同 FPS 的影片與 44100Hz音訊對齊
 
 2. 動態資料加載器 (data_loader.py)
+
 採用 Mix-and-Separate 訓練策略：
+
 積木式混合：支援從樣本庫中隨機挑選兩個獨立的吉他樣本 (A & B) 進行即時混合
+
 隨機裁剪：在訓練時自動從長影片中隨機截取 10 秒 (300 幀) 的片段
 
 📈 技術亮點
+
 視覺導引 (Visual-Guide)：利用右手撥弦的 Timing (Onset) 與左手按弦的把位 (Pitch) 資訊，輔助音訊分離模型在頻率重疊時仍能精確切分聲音
+
 原子化設計：所有預處理均以「單人」為單位，訓練時才進行動態混合，極大化數據利用率與模型的泛化能力
 
 📅 下一步開發計畫
+
 實作基於 Transformer/LSTM 的運動特徵編碼器 (Motion Encoder)
+
 開發 UNet/Conv-TasNet 音訊分離主體架構
+
 整合左手位置與頻譜特徵的自動轉錄模組
