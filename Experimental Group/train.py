@@ -1,3 +1,5 @@
+#with l-spec, l-wav, l-sisdr, l-irm(mask shape)
+
 import os
 import torch
 import torch.nn.functional as F
