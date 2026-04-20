@@ -5,10 +5,6 @@ import math
 from demucs.htdemucs import HTDemucs
 
 
-# ============================================================
-# STFT / iSTFT 工具
-# ============================================================
-
 def stft(wav, n_fft=2048, hop=512):
     """
     wav : [B, 1, L]
@@ -36,14 +32,6 @@ def istft(mag, phase, n_fft=2048, hop=512, length=None):
     return wav.unsqueeze(1)       # [B, 1, L]
 
 
-# ============================================================
-# 1. 視覺流編碼器 (AM-Net 精神)
-#    app : [B, 150, 26, 3] → flatten → [B, 150, 78]
-#    mot : [B, 150, 26, 4] → flatten → [B, 150, 104]
-#    (data_loader 中 app = m[:,:,:3], mot = m[:,:,3:7]
-#     其中 m 的 landmark 維度是 26，所以 flatten 後分別是 78, 104)
-# ============================================================
-
 class AMNetStreamEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim=256, output_dim=512):
         super().__init__()
@@ -63,23 +51,6 @@ class AMNetStreamEncoder(nn.Module):
             x = x.reshape(b, t, p * d)
         return self.net(x)  # [B, T, 512]
 
-
-# ============================================================
-# 2. 頻譜 Ratio Mask Head（核心修改）
-#    視覺特徵 [B,150,512] → 頻譜 mask [B,F,T_spec]
-#
-#    設計來源：
-#    - AMnet (Zhu & Rahtu 2022)：appearance feature × audio spec feature → mask
-#    - AVPC (Song & Zhang 2023)：visual feature → predict audio, mask × Xmix
-#    - Wang et al. PSL：視覺引導頻譜分離
-#
-#    流程：
-#      1. 視覺全局向量 v_global [B,512]
-#      2. 混音頻譜 Xmix [B,F,T_spec] 展平後投影到 512 維
-#      3. 視覺特徵作為 query，頻譜特徵作為 key/value → cross-attention
-#      4. 投影回 [B,F,T_spec]，Sigmoid → ratio mask in (0,1)
-#      5. pred_spec = mask × Xmix
-# ============================================================
 
 class SpectralMaskHead(nn.Module):
     def __init__(self, v_dim=512, n_freq=1025, hidden=256):
@@ -125,27 +96,20 @@ class SpectralMaskHead(nn.Module):
         """
         B, F, T = spec_mag.shape
 
-        # 視覺 FiLM：在頻率維度做 scale + shift（不動 waveform，不造成相位破壞）
-        film = self.vis_to_film(v_global)          # [B, F*2]
-        gamma = film[:, :F].unsqueeze(2) + 1.0    # [B, F, 1]，初始化在 1 附近
-        beta  = film[:, F:].unsqueeze(2)           # [B, F, 1]，初始化在 0 附近
+        film = self.vis_to_film(v_global)        
+        gamma = film[:, :F].unsqueeze(2) + 1.0    
+        beta  = film[:, F:].unsqueeze(2)           
 
         # 視覺引導的頻譜特徵
-        feat = gamma * spec_mag + beta             # [B, F, T]  — FiLM in spec domain
-        feat = self.spec_conv(feat)                # [B, F, T]
+        feat = gamma * spec_mag + beta             
+        feat = self.spec_conv(feat)                
 
         # 生成 mask
-        mask = self.mask_head(feat)                # [B, F, T] in (0,1)
-        pred_mag = mask * spec_mag                 # ratio mask × mixture mag
+        mask = self.mask_head(feat)               
+        pred_mag = mask * spec_mag                 
 
         return mask, pred_mag
 
-
-# ============================================================
-# 3. PSL Head（Wang et al. ICIP 2022）
-#    audio patch cosine similarity vs 視覺全局向量
-#    回傳 raw logits 供 BCEWithLogitsLoss 使用
-# ============================================================
 
 class PSLHead(nn.Module):
     def __init__(self, audio_dim=512, v_dim=512):
@@ -159,20 +123,16 @@ class PSLHead(nn.Module):
         audio_patches: [B, K, 512]
         returns logits [B, K]
         """
-        a_proj = self.audio_proj(audio_patches)   # [B, K, 512]
-        v_a = F.normalize(v_a_global.unsqueeze(1), dim=-1)  # [B,1,512]
-        v_b = F.normalize(v_b_global.unsqueeze(1), dim=-1)  # [B,1,512]
-        a_n = F.normalize(a_proj, dim=-1)                   # [B,K,512]
-        sim_a = (a_n * v_a).sum(dim=-1)   # [B, K]
-        sim_b = (a_n * v_b).sum(dim=-1)   # [B, K]
-        return sim_a - sim_b              # raw logits
+        a_proj = self.audio_proj(audio_patches)   
+        v_a = F.normalize(v_a_global.unsqueeze(1), dim=-1)  
+        v_b = F.normalize(v_b_global.unsqueeze(1), dim=-1)  
+        a_n = F.normalize(a_proj, dim=-1)                   
+        sim_a = (a_n * v_a).sum(dim=-1)   
+        sim_b = (a_n * v_b).sum(dim=-1)   
+        return sim_a - sim_b              
 
 
-# ============================================================
-# 4. Audio Patch Encoder（用於 PSL）
-#    把 STFT 頻譜的時間 frame 作為 patch，投影到 512 維
-#    比原本的 waveform patch 更穩定（不會因 waveform 相位而分散）
-# ============================================================
+
 
 class AudioPatchEncoder(nn.Module):
     def __init__(self, n_freq=1025, out_dim=512):
@@ -192,19 +152,7 @@ class AudioPatchEncoder(nn.Module):
         return self.proj(spec_mag.transpose(1, 2))
 
 
-# ============================================================
-# 5. VisualBottleneckInjector
-#    在 HTDemucs.crosstransformer 輸出之後注入視覺特徵。
-#
-#    時間分支 xt [B, C, T_t]：
-#      cross-attention(Q=xt_tokens, K/V=visual_seq) + LayerScale 殘差
-#
-#    頻譜分支 x [B, C, Fr, T_f]：
-#      FiLM(visual_global) → gamma/beta 作用在頻率×時間維度 + LayerScale 殘差
-#
-#    HTDemucs 預設 channels=48, depth=4, growth=2
-#    → transformer_channels = 48 * 2^3 = 384
-# ============================================================
+
 
 class VisualBottleneckInjector(nn.Module):
     BOTTLENECK_DIM = 384  # HTDemucs 預設瓶頸 channel 數
@@ -213,30 +161,23 @@ class VisualBottleneckInjector(nn.Module):
         super().__init__()
         C = self.BOTTLENECK_DIM
 
-        # 視覺序列投影到音訊瓶頸維度
+        
         self.v_proj = nn.Linear(v_dim, C)
 
-        # 時間分支：cross-attention（Q=audio, K/V=visual）
+       
         self.t_cross_attn = nn.MultiheadAttention(
             embed_dim=C, num_heads=num_heads, batch_first=True
         )
         self.t_norm = nn.LayerNorm(C)
 
-        # 頻譜分支：FiLM
+        
         self.s_film = nn.Linear(v_dim, C * 2)
 
-        # LayerScale：初始接近 0，訓練初期影響極小，不破壞預訓練動態
+        
         self.t_scale = nn.Parameter(torch.full((C,), 1e-4))
         self.s_scale = nn.Parameter(torch.full((C,), 1e-4))
 
     def forward(self, x, xt, v_seq, v_global):
-        """
-        x        : [B, C, Fr, T_f]  頻譜分支
-        xt       : [B, C, T_t]      時間分支
-        v_seq    : [B, T_vis, v_dim] 視覺特徵序列
-        v_global : [B, v_dim]        視覺全局向量
-        returns  : x_new, xt_new（同 shape）
-        """
         B, C, T_t = xt.shape
 
         # ── 時間分支 ──────────────────────────────────────────
@@ -256,34 +197,14 @@ class VisualBottleneckInjector(nn.Module):
         return x_new, xt_new
 
 
-# ============================================================
-# 5. 主模型：VisualGuidedHTDemucs（頻譜 masking 版本）
-#
-#  修改摘要（v3）：
-#  ① sources=["guitar_a","guitar_b"]，保留 2-source 輸出
-#  ② 移除 waveform-level FiLM（沙沙聲根本來源）
-#  ③ 新增 SpectralMaskHead：視覺引導的頻譜 ratio mask
-#     - FiLM 移到頻譜域（gamma/beta 作用在 mag spectrogram，不動 phase）
-#     - pred_mag = mask × STFT(mix)，iSTFT 重建時用 mix 的 phase
-#  ④ HTDemucs 保留作為「可選的波形精修」分支
-#     - 若視覺有效：頻譜 mask 分離 + HTDemucs 波形微調（weighted sum）
-#     - 若視覺無效：直接用 HTDemucs 輸出（fallback）
-#  ⑤ PSL audio patch 改為頻譜 frame patch（更穩定）
-# ============================================================
 
 class VisualGuidedHTDemucs(nn.Module):
 
-    # STFT 參數（需與 train 端一致）
     N_FFT = 2048
     HOP   = 512
     N_FREQ = N_FFT // 2 + 1  # 1025
 
     def __init__(self, visual_weight=0.7):
-        """
-        visual_weight : 頻譜 mask 分支的混合權重
-                        final = visual_weight * spec_out + (1-visual_weight) * htdemucs_out
-                        初始設 0.7，讓視覺分支主導，HTDemucs 負責補殘差
-        """
         super().__init__()
         self.visual_weight = visual_weight
 
@@ -304,7 +225,7 @@ class VisualGuidedHTDemucs(nn.Module):
         # opponent suppression 強度（可學習，初始值 0.3）
         self.alpha = nn.Parameter(torch.tensor(0.3))
 
-        # ── 頻譜 Mask Head（核心，取代 waveform FiLM）──────────
+        # ── 頻譜 Mask Head──────────
         self.spec_mask_head = SpectralMaskHead(
             v_dim=512, n_freq=self.N_FREQ, hidden=256
         )
@@ -324,10 +245,6 @@ class VisualGuidedHTDemucs(nn.Module):
 
     # ── HTDemucs monkey-patch ─────────────────────────────────
     def _patch_htdemucs_forward(self):
-        """
-        把 HTDemucs.forward 替換成注入版本。
-        只有 crosstransformer 後那一行不同，其餘與原始碼完全一致。
-        """
         from fractions import Fraction
         from einops import rearrange
 
@@ -449,12 +366,10 @@ class VisualGuidedHTDemucs(nn.Module):
         self.audio_model.forward = types.MethodType(patched_forward, self.audio_model)
 
     def _set_visual(self, v_seq, v_global):
-        """HTDemucs forward 執行前呼叫，提供視覺特徵供注入器使用"""
         self._vis_seq    = v_seq      # [B, 150, 512]
         self._vis_global = v_global   # [B, 512]
 
     def _clear_visual(self):
-        """無視覺時清除，注入器自動跳過"""
         self._vis_seq    = None
         self._vis_global = None
 
@@ -473,21 +388,6 @@ class VisualGuidedHTDemucs(nn.Module):
 
     # ── Forward ──────────────────────────────────────────────────
     def forward(self, mix_wav, app_A, mot_A, app_B, mot_B, has_visual=True):
-        """
-        mix_wav   : [B, 1, L]
-        app_A/B   : [B, 150, 26, 3]
-        mot_A/B   : [B, 150, 26, 4]
-        has_visual: bool
-
-        returns:
-            pred_wav  [B, 1, L]   — 最終預測波形
-            pred_mag  [B, F, T]   — 頻譜 mask 分支的預測 magnitude（用於 spec loss）
-            mask      [B, F, T]   — 頻譜 ratio mask，∈(0,1)（用於 IRM BCE loss）
-            mix_mag   [B, F, T]   — 混音頻譜 magnitude
-            mix_phase [B, F, T]   — 混音相位（iSTFT 用）
-            p_hat     [B, T]      — PSL logits（有視覺才有意義）
-            has_visual bool
-        """
         B, C, L = mix_wav.shape
 
         # ── STFT 混音 ──────────────────────────────────────────
