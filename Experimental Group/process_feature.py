@@ -21,7 +21,6 @@ hands = mp_hands.Hands(
 
 
 class HandSmoothingFilter:
-    """時間平滑濾波器（中值濾波）"""
     def __init__(self, window_size=5):
         self.window_size = window_size
         self.buffer = deque(maxlen=window_size)
@@ -37,15 +36,6 @@ class HandSmoothingFilter:
 
 
 def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
-    """
-    手部特徵提取。
-
-    修正①：A_Left [8, 7] 和 A_Right [5, 7] 繼續分開儲存，
-    不在此處 concatenate，由 data_loader 負責合併或分開送入 model。
-
-    修正②：移除逐幀的 gain×50 pre-clip，保留原始連續速度值，
-    全局歸一化在後處理統一做。偵測失敗幀記錄為 valid=False。
-    """
     LEFT_INDICES  = [5, 8, 9, 12, 13, 16, 17, 20]   # 8 個關節（按弦手）
     RIGHT_INDICES = [0, 2, 4, 5, 9]                  # 5 個關節（撥弦手）
 
@@ -75,7 +65,6 @@ def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
         res_lms = hand_info['landmarks']
         wrist_x = hand_info['wrist_x']
 
-        # 修正①：用相對位置判斷，但保持與原邏輯一致的閾值
         if wrist_x < 0.4:
             actual_hand = "Right"
             indices     = RIGHT_INDICES
@@ -104,7 +93,6 @@ def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
         prev_coords = prev_coords_dict.get(key, np.zeros_like(smooth_coords))
         diff = smooth_coords - prev_coords
 
-        # 修正②：速度不做 pre-clip，保留原始連續值供後續全局歸一化使用
         velocity_raw = np.linalg.norm(diff, axis=-1, keepdims=True)  # [points, 1]
 
         motion_data = np.concatenate([diff, velocity_raw], axis=-1)  # [points, 4]
@@ -117,12 +105,6 @@ def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
 
 
 def draw_tracking_frame(frame, results, frame_idx):
-    """
-    在原始幀上繪製追蹤結果，回傳標注後的 frame（BGR numpy array）。
-    - 藍色骨架 = 判定為按弦手（Left / 畫面右側）
-    - 紅色骨架 = 判定為撥弦手（Right / 畫面左側）
-    - 框角標注手的 label 與偵測信心度
-    """
     annotated = frame.copy()
 
     if not results.multi_hand_landmarks:
@@ -173,13 +155,6 @@ def draw_tracking_frame(frame, results, frame_idx):
 
 def video_audio_process(video_path, audio_path, output_prefix=None,
                         write_tracking_video=True, tracking_fps=None):
-    """
-    單人吉他手部特徵提取主函數
-
-    修正③：A_Left 和 A_Right 分開儲存為獨立的 .npy 檔案。
-    data_loader 的 concatenate 繼續保持（不需要改 data_loader）。
-    同時輸出 valid_mask.npy 供 data_loader 在裁切片段時跳過零值幀。
-    """
     if output_prefix is None:
         output_prefix = Path(video_path).stem
         print(f"📝 輸出前綴: {output_prefix}")
