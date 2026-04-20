@@ -17,9 +17,6 @@ from data_loader_temp import GuitarSeparationDataset
 from model_arch import VisualGuidedHTDemucs, stft
 
 
-# ==========================================
-# Metrics（numpy，與 train_base 一致）
-# ==========================================
 
 def calculate_metrics(ref, est):
     ref = ref.detach().cpu().numpy()
@@ -34,15 +31,6 @@ def calculate_metrics(ref, est):
     return np.mean(sdr), np.mean(sir), np.mean(sar)
 
 
-# ==========================================
-# SI-SDR Loss（時域，直接優化 SIR）
-# 必須在 autocast 外以 float32 計算，避免數值精度問題
-#
-# 公式：SI-SDR = 10 * log10(||s_target||² / ||e_noise||²)
-#   s_target = <pred, ref> / ||ref||² * ref
-#   e_noise  = pred - s_target
-# loss = -mean(SI-SDR)，最大化 SI-SDR 等於最小化 -SI-SDR
-# ==========================================
 
 def si_sdr_loss(pred, ref, eps=1e-8):
     """
@@ -75,10 +63,6 @@ def si_sdr_loss(pred, ref, eps=1e-8):
     return -si_sdr.mean()   # 最小化負 SI-SDR
 
 
-# ==========================================
-# PSL Ground Truth（Wang et al. 2022）
-# 在頻譜 patch 上計算歸屬機率
-# ==========================================
 
 def compute_psl_gt(s_a_wav, mix_wav, n_fft=2048, hop=512):
     """
@@ -97,19 +81,11 @@ def compute_psl_gt(s_a_wav, mix_wav, n_fft=2048, hop=512):
     return p_gt  # [B, T]
 
 
-# ==========================================
-# Silent Check（RMS-based）
-# ==========================================
-
 def is_silent(x, threshold=1e-4):
     """x: [B,1,L] tensor"""
     rms = torch.sqrt(torch.mean(x ** 2))
     return rms < threshold
 
-
-# ==========================================
-# Save Debug
-# ==========================================
 
 def save_bad_case(epoch, step, mix, s_a, pred_s_a):
     path = f"{CONFIG['debug_dir']}/epoch{epoch}_step{step}"
@@ -119,9 +95,7 @@ def save_bad_case(epoch, step, mix, s_a, pred_s_a):
     torchaudio.save(path + "_predA.wav",  pred_s_a[0].cpu(), CONFIG['sr'])
 
 
-# ==========================================
-# Plot
-# ==========================================
+
 
 def plot_training(history):
     clear_output(wait=True)
@@ -134,9 +108,6 @@ def plot_training(history):
     plt.show()
 
 
-# ==========================================
-# CONFIG
-# ==========================================
 
 CONFIG = {
     'data_dir':        '/content/dataset',
@@ -154,9 +125,6 @@ os.makedirs(CONFIG['checkpoint_dir'], exist_ok=True)
 os.makedirs(CONFIG['debug_dir'],      exist_ok=True)
 
 
-# ==========================================
-# Train
-# ==========================================
 
 def train():
 
@@ -185,7 +153,6 @@ def train():
         {"params": backbone_params, "lr": CONFIG['learning_rate'] * 0.1},
         {"params": new_params,      "lr": CONFIG['learning_rate']},
     ])
-    # CosineAnnealingLR：lr 從 1e-4 平滑降到 1e-6，在第 200 epoch 才到最低點
     scheduler = CosineAnnealingLR(optimizer, T_max=CONFIG['num_epochs'], eta_min=1e-6)
     scaler    = GradScaler()
 
@@ -232,9 +199,6 @@ def train():
                     mix, app_A, mot_A, app_B, mot_B, has_visual=has_visual
                 )
 
-            # ── SI-SDR loss（autocast 外，強制 float32）────────────
-            # 單一 loss，梯度方向完全一致，無衝突
-            # sample_weight 對 loss 做逐樣本加權
             w_mean     = w.mean()
             total_loss = si_sdr_loss(pred_wav, s_a) * w_mean
 
