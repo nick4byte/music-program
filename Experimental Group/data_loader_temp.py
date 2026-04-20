@@ -14,9 +14,6 @@ from pedalboard import Pedalboard, Compressor, Reverb, HighShelfFilter, Bitcrush
 class GuitarSeparationDataset(Dataset):
     def __init__(self, data_dir, segment_duration=5.0, sample_rate=44100,
                  min_energy_threshold=1e-4):
-        """
-        min_energy_threshold : RMS 低於此值的片段視為靜音，跳過混合
-        """
         self.data_dir = data_dir
         self.audio_root = os.path.join(data_dir, "audio")
         self.visual_root = os.path.join(data_dir, "visual")
@@ -35,24 +32,18 @@ class GuitarSeparationDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    # ── 靜音判斷（RMS-based，比 mean(abs) 更準確）───────────────
     def _is_silent(self, wav_np):
         """wav_np: 1D numpy array"""
         rms = np.sqrt(np.mean(wav_np ** 2))
         return rms < self.min_energy
 
-    # ── 樣本權重（來自預處理的 RMS-peak-check 結果）─────────────
     def _load_sample_weight(self, s_id):
-        """
-        預處理時已根據 RMS-peak-check 將權重存為 JSON 或 npy。
-        格式假設為 {s_id: weight}，找不到時預設 1.0。
-        """
         weight_file = os.path.join(self.visual_root, f"{s_id}_weight.npy")
         if os.path.exists(weight_file):
             return float(np.load(weight_file))
         return 1.0
 
-    # ── 隨機後製（模擬 YT / music dataset 的音色多樣性）─────────
+    # ── 隨機後製─────────
     def apply_random_postprocessing(self, waveform_np):
         board = Pedalboard([
             Compressor(
@@ -191,9 +182,6 @@ class GuitarSeparationDataset(Dataset):
             weight_b = self._load_sample_weight(s_id_B)
             sample_weight = (weight_a + weight_b) / 2.0
 
-            # ── 視覺有效率：A 和 B 取最小值 ────────────────────────
-            # has_visual=True  → 視覺特徵足夠可靠，PSL loss 以完整權重計算
-            # has_visual=False → 大量零值幀，PSL loss 應跳過或降權
             visual_quality = min(visual_quality_a, visual_quality_b)
             has_visual = bool(visual_quality >= 0.5)
 
