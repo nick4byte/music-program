@@ -15,8 +15,8 @@ def stft(wav, n_fft=2048, hop=512):
     win = torch.hann_window(n_fft, device=wav.device)
     spec = torch.stft(x, n_fft=n_fft, hop_length=hop,
                       window=win, return_complex=True, normalized=False)
-    mag   = spec.abs()            # [B, F, T]
-    phase = spec.angle()          # [B, F, T]
+    mag   = spec.abs()           
+    phase = spec.angle()          
     return mag, phase
 
 
@@ -29,7 +29,7 @@ def istft(mag, phase, n_fft=2048, hop=512, length=None):
     win = torch.hann_window(n_fft, device=mag.device)
     wav = torch.istft(spec, n_fft=n_fft, hop_length=hop,
                       window=win, length=length, normalized=False)
-    return wav.unsqueeze(1)       # [B, 1, L]
+    return wav.unsqueeze(1)      
 
 
 class AMNetStreamEncoder(nn.Module):
@@ -45,33 +45,23 @@ class AMNetStreamEncoder(nn.Module):
         )
 
     def forward(self, x):
-        # x: [B, T, P, D] 或 [B, T, P*D]
         if x.dim() == 4:
             b, t, p, d = x.shape
             x = x.reshape(b, t, p * d)
-        return self.net(x)  # [B, T, 512]
+        return self.net(x)  
 
 
 class SpectralMaskHead(nn.Module):
     def __init__(self, v_dim=512, n_freq=1025, hidden=256):
-        """
-        n_freq : n_fft//2 + 1，對應 STFT 的頻率 bin 數量
-                 n_fft=2048 → n_freq=1025
-        """
         super().__init__()
         self.n_freq = n_freq
 
-        # 視覺全局向量 → 頻率軸的 FiLM 參數（在頻譜域做 scale/shift，安全）
         self.vis_to_film = nn.Sequential(
             nn.Linear(v_dim, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, n_freq * 2),  # gamma + beta，每個頻率 bin 各一個
+            nn.Linear(hidden, n_freq * 2),  
         )
 
-        # 頻譜 feature extractor（在頻率軸做 1D conv）
-        # 注意：Conv1d 輸出 [B, C, T]，不能用 LayerNorm(C)（它期待最後一維=C）
-        # 改用 GroupNorm(num_groups=1, num_channels=hidden)，等價於 InstanceNorm，
-        # 對 [B, C, T] 是安全的。
         self.spec_conv = nn.Sequential(
             nn.Conv1d(n_freq, hidden, kernel_size=3, padding=1),
             nn.GroupNorm(1, hidden),
@@ -79,32 +69,24 @@ class SpectralMaskHead(nn.Module):
             nn.Conv1d(hidden, n_freq, kernel_size=3, padding=1),
         )
 
-        # 最終 mask head
+
         self.mask_head = nn.Sequential(
             nn.Conv1d(n_freq, n_freq, kernel_size=1),
             nn.Sigmoid(),
         )
 
     def forward(self, v_global, spec_mag):
-        """
-        v_global : [B, 512]   — 視覺全局向量（有 opponent suppression 後的）
-        spec_mag : [B, F, T]  — STFT 混音頻譜（magnitude）
-
-        returns:
-            mask     [B, F, T]  in (0, 1)
-            pred_mag [B, F, T]  = mask × spec_mag
-        """
         B, F, T = spec_mag.shape
 
         film = self.vis_to_film(v_global)        
         gamma = film[:, :F].unsqueeze(2) + 1.0    
         beta  = film[:, F:].unsqueeze(2)           
 
-        # 視覺引導的頻譜特徵
+
         feat = gamma * spec_mag + beta             
         feat = self.spec_conv(feat)                
 
-        # 生成 mask
+
         mask = self.mask_head(feat)               
         pred_mag = mask * spec_mag                 
 
@@ -144,18 +126,13 @@ class AudioPatchEncoder(nn.Module):
         )
 
     def forward(self, spec_mag):
-        """
-        spec_mag : [B, F, T]
-        returns  : [B, T, out_dim]  — 每個時間 frame 是一個 patch
-        """
-        # spec_mag [B,F,T] → transpose → [B,T,F] → proj → [B,T,512]
         return self.proj(spec_mag.transpose(1, 2))
 
 
 
 
 class VisualBottleneckInjector(nn.Module):
-    BOTTLENECK_DIM = 384  # HTDemucs 預設瓶頸 channel 數
+    BOTTLENECK_DIM = 384  
 
     def __init__(self, v_dim=512, num_heads=8):
         super().__init__()
@@ -180,16 +157,14 @@ class VisualBottleneckInjector(nn.Module):
     def forward(self, x, xt, v_seq, v_global):
         B, C, T_t = xt.shape
 
-        # ── 時間分支 ──────────────────────────────────────────
-        v_k = self.v_proj(v_seq)                     # [B, T_vis, C]
-        xt_q = xt.transpose(1, 2)                    # [B, T_t, C]
+        v_k = self.v_proj(v_seq)                     
+        xt_q = xt.transpose(1, 2)                    
         attn_out, _ = self.t_cross_attn(xt_q, v_k, v_k)
         xt_new = self.t_norm(
             xt_q + self.t_scale * attn_out
-        ).transpose(1, 2)                            # [B, C, T_t]
+        ).transpose(1, 2)                            
 
-        # ── 頻譜分支 ──────────────────────────────────────────
-        film  = self.s_film(v_global)                # [B, C*2]
+        film  = self.s_film(v_global)                
         gamma = film[:, :C].view(B, C, 1, 1)
         beta  = film[:, C:].view(B, C, 1, 1)
         x_new = x + self.s_scale.view(1, C, 1, 1) * (gamma * x + beta)
@@ -208,47 +183,35 @@ class VisualGuidedHTDemucs(nn.Module):
         super().__init__()
         self.visual_weight = visual_weight
 
-        # ── 音訊主幹（保留，作為波形精修分支）──────────────────
         self.audio_model = HTDemucs(
             sources=["guitar_a", "guitar_b"],
         )
 
-        # ── 視覺編碼器 ──────────────────────────────────────────
-        # data_loader: app=[B,150,13,3] → flatten=39; mot=[B,150,13,4] → flatten=52
         self.app_encoder = AMNetStreamEncoder(input_dim=39)
         self.mot_encoder = AMNetStreamEncoder(input_dim=52)
 
-        # motion→appearance cross-attention（AMNet 精神）
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=512, num_heads=8, batch_first=True,
         )
-        # opponent suppression 強度（可學習，初始值 0.3）
         self.alpha = nn.Parameter(torch.tensor(0.3))
 
-        # ── 頻譜 Mask Head──────────
         self.spec_mask_head = SpectralMaskHead(
             v_dim=512, n_freq=self.N_FREQ, hidden=256
         )
-
-        # ── PSL Head ────────────────────────────────────────────
         self.audio_patch_enc = AudioPatchEncoder(n_freq=self.N_FREQ, out_dim=512)
         self.psl_head = PSLHead(audio_dim=512, v_dim=512)
 
-        # ── 瓶頸視覺注入器 ───────────────────────────────────────
         self.bottleneck_injector = VisualBottleneckInjector(v_dim=512, num_heads=8)
-        # 注入器狀態（每次 forward 前更新）
+
         self._vis_seq    = None
         self._vis_global = None
-        # monkey-patch：把注入邏輯綁定到 audio_model 上，
-        # 在 crosstransformer 之後自動介入
         self._patch_htdemucs_forward()
 
-    # ── HTDemucs monkey-patch ─────────────────────────────────
     def _patch_htdemucs_forward(self):
         from fractions import Fraction
         from einops import rearrange
 
-        outer = self  # 捕捉外部 self
+        outer = self  
 
         def patched_forward(htd_self, mix):
             length = mix.shape[-1]
@@ -303,13 +266,11 @@ class VisualGuidedHTDemucs(nn.Module):
 
                 x, xt = htd_self.crosstransformer(x, xt)
 
-                # ── 視覺注入（唯一新增的部分）────────────────
                 if (outer._vis_seq is not None and
                         outer._vis_global is not None):
                     x, xt = outer.bottleneck_injector(
                         x, xt, outer._vis_seq, outer._vis_global
                     )
-                # ─────────────────────────────────────────────
 
                 if htd_self.bottom_channels:
                     x  = rearrange(x, "b c f t-> b c (f t)")
@@ -373,7 +334,6 @@ class VisualGuidedHTDemucs(nn.Module):
         self._vis_seq    = None
         self._vis_global = None
 
-    # ── 視覺特徵提取（共用）──────────────────────────────────────
     def encode_visual(self, app, mot):
         """
         app : [B, 150, 13, 3]  → flatten → [B, 150, 39]
@@ -385,64 +345,51 @@ class VisualGuidedHTDemucs(nn.Module):
         mot_feat = self.mot_encoder(mot.reshape(B, 150, -1))  # [B,150,512]
         attn_out, _ = self.cross_attn(mot_feat, app_feat, app_feat)
         return attn_out  # [B, 150, 512]
-
-    # ── Forward ──────────────────────────────────────────────────
+        
     def forward(self, mix_wav, app_A, mot_A, app_B, mot_B, has_visual=True):
         B, C, L = mix_wav.shape
 
-        # ── STFT 混音 ──────────────────────────────────────────
         mix_mag, mix_phase = stft(mix_wav, n_fft=self.N_FFT, hop=self.HOP)
         # mix_mag: [B, F, T_spec]
 
         # HTDemucs 需要 stereo input [B, 2, L]
         mix_stereo = mix_wav.repeat(1, 2, 1) if C == 1 else mix_wav
 
-        # ── 視覺引導分支 ───────────────────────────────────────
         if has_visual:
             feat_A = self.encode_visual(app_A, mot_A)  # [B,150,512]
             feat_B = self.encode_visual(app_B, mot_B)  # [B,150,512]
 
-            # opponent suppression
             alpha = torch.clamp(self.alpha, 0.0, 1.0)
             feat_A_final = feat_A - alpha * feat_B     # [B,150,512]
             feat_B_final = feat_B - alpha * feat_A     # [B,150,512]
 
-            # 視覺全局向量（時間維度 mean pool）
+
             v_a_global = feat_A_final.mean(dim=1)      # [B, 512]
             v_b_global = feat_B_final.mean(dim=1)      # [B, 512]
 
-            # 提供視覺特徵給瓶頸注入器
             self._set_visual(feat_A_final, v_a_global)
         else:
             self._clear_visual()
             v_a_global = None
             v_b_global = None
 
-        # ── HTDemucs 波形分離（瓶頸層視覺注入在內部自動觸發）──
         htd_out = self.audio_model(mix_stereo)
-        self._clear_visual()  # forward 結束後清除，避免下次誤用
+        self._clear_visual() 
         # htd_out: [B, 2_sources, 2_stereo, L]
         htd_wav = htd_out[:, 0, :, :].mean(dim=1, keepdim=True)  # [B,1,L]
 
         if has_visual:
 
-            # 頻譜 ratio mask（FiLM 在頻譜域，不破壞相位）
             mask, pred_mag = self.spec_mask_head(v_a_global, mix_mag)
-            # mask: [B,F,T_spec], pred_mag: [B,F,T_spec]
-
-            # iSTFT 重建：pred_mag + mix_phase → 波形（phase 來自原始混音，無相位破壞）
             spec_wav = istft(pred_mag, mix_phase, n_fft=self.N_FFT,
                              hop=self.HOP, length=L)   # [B,1,L]
 
-            # 最終輸出：視覺頻譜分支 × w + HTDemucs 精修 × (1-w)
             pred_wav = self.visual_weight * spec_wav + (1.0 - self.visual_weight) * htd_wav
 
-            # PSL：用頻譜 frame 作為 audio patch（比 waveform patch 更穩定）
             audio_patches = self.audio_patch_enc(mix_mag)   # [B, T_spec, 512]
             p_hat = self.psl_head(v_a_global, v_b_global, audio_patches)  # [B, T_spec]
 
         else:
-            # 無視覺：直接用 HTDemucs 輸出，頻譜分支跳過
             pred_wav = htd_wav
             pred_mag = None
             mask     = None
