@@ -33,48 +33,33 @@ def calculate_metrics(ref, est):
 
 
 def si_sdr_loss(pred, ref, eps=1e-8):
-    """
-    pred : [B, 1, L]  模型預測
-    ref  : [B, 1, L]  ground truth
-    returns: scalar loss（負 SI-SDR 的 batch mean）
-    """
-    # 展平到 [B, L] 方便計算
-    pred = pred.squeeze(1).float()   # 強制 float32
+    pred = pred.squeeze(1).float()   
     ref  = ref.squeeze(1).float()
 
-    # 零均值化（SI-SDR 的標準做法）
     pred = pred - pred.mean(dim=-1, keepdim=True)
     ref  = ref  - ref.mean(dim=-1, keepdim=True)
 
-    # s_target：ref 在 pred 方向上的投影
-    dot        = (pred * ref).sum(dim=-1, keepdim=True)      # [B, 1]
-    ref_energy = (ref * ref).sum(dim=-1, keepdim=True) + eps  # [B, 1]
-    s_target   = (dot / ref_energy) * ref                    # [B, L]
+    dot        = (pred * ref).sum(dim=-1, keepdim=True)      
+    ref_energy = (ref * ref).sum(dim=-1, keepdim=True) + eps  
+    s_target   = (dot / ref_energy) * ref                    
 
-    # e_noise：殘差
-    e_noise = pred - s_target                                 # [B, L]
+    e_noise = pred - s_target                                 
 
-    # SI-SDR per sample
+
     si_sdr = 10 * torch.log10(
         (s_target * s_target).sum(dim=-1) /
         ((e_noise * e_noise).sum(dim=-1) + eps)
-    )  # [B]
+    ) 
 
-    return -si_sdr.mean()   # 最小化負 SI-SDR
+    return -si_sdr.mean()   
 
 
 
 def compute_psl_gt(s_a_wav, mix_wav, n_fft=2048, hop=512):
-    """
-    s_a_wav  : [B, 1, L]
-    mix_wav  : [B, 1, L]
-    returns p_gt [B, T_spec] in (0,1)
-    """
     with torch.no_grad():
         s_b_wav = mix_wav - s_a_wav
         mag_a, _ = stft(s_a_wav, n_fft=n_fft, hop=hop)  # [B, F, T]
         mag_b, _ = stft(s_b_wav, n_fft=n_fft, hop=hop)  # [B, F, T]
-        # 每個時間 frame 的能量（沿頻率軸 mean）
         energy_a = mag_a.mean(dim=1)   # [B, T]
         energy_b = mag_b.mean(dim=1)   # [B, T]
         p_gt = torch.sigmoid(energy_a - energy_b)
@@ -82,7 +67,6 @@ def compute_psl_gt(s_a_wav, mix_wav, n_fft=2048, hop=512):
 
 
 def is_silent(x, threshold=1e-4):
-    """x: [B,1,L] tensor"""
     rms = torch.sqrt(torch.mean(x ** 2))
     return rms < threshold
 
@@ -145,7 +129,6 @@ def train():
 
     model = VisualGuidedHTDemucs().to(CONFIG['device'])
 
-    # 分層學習率：HTDemucs 主幹用 0.1x，新增的視覺模組用全量 lr
     backbone_params = list(model.audio_model.parameters())
     backbone_ids    = {id(p) for p in backbone_params}
     new_params      = [p for p in model.parameters() if id(p) not in backbone_ids]
@@ -192,8 +175,6 @@ def train():
                 has_visual = bool(has_visual.all().item())
 
             optimizer.zero_grad(set_to_none=True)
-
-            # ── 模型前向（autocast 內只跑 forward，不算 loss）──────
             with autocast(device_type='cuda'):
                 pred_wav, pred_mag, mask, mix_mag, mix_phase, p_hat, _ = model(
                     mix, app_A, mot_A, app_B, mot_B, has_visual=has_visual
