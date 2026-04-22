@@ -14,9 +14,6 @@ from IPython.display import clear_output
 from data_loader_temp import GuitarSeparationDataset
 from baseline import PureHTDemucs, stft
 
-# ==========================================
-# CONFIG
-# ==========================================
 
 CONFIG = {
     'data_dir':        '/content/dataset',
@@ -34,9 +31,6 @@ os.makedirs(CONFIG['checkpoint_dir'], exist_ok=True)
 os.makedirs(CONFIG['debug_dir'],      exist_ok=True)
 
 
-# ==========================================
-# Metrics
-# ==========================================
 
 def calculate_metrics(ref, est):
     ref = ref.detach().cpu().numpy()
@@ -54,9 +48,7 @@ def calculate_metrics(ref, est):
     return np.mean(sdr), np.mean(sir), np.mean(sar)
 
 
-# ==========================================
-# SI-SDR Loss（時域，單一主 loss）
-# ==========================================
+
 
 def si_sdr_loss(pred, ref, eps=1e-8):
     """
@@ -82,17 +74,13 @@ def si_sdr_loss(pred, ref, eps=1e-8):
     return -si_sdr.mean()
 
 
-# ==========================================
-# Silent Check
-# ==========================================
+
 
 def is_silent(x, threshold=1e-4):
     return torch.sqrt(torch.mean(x ** 2)) < threshold
 
 
-# ==========================================
-# Save Debug
-# ==========================================
+
 
 def save_bad_case(epoch, step, mix, s_a, pred_a):
     path = f"{CONFIG['debug_dir']}/epoch{epoch}_step{step}"
@@ -102,9 +90,6 @@ def save_bad_case(epoch, step, mix, s_a, pred_a):
     torchaudio.save(path + "_predA.wav", pred_a[0].cpu(), CONFIG['sr'])
 
 
-# ==========================================
-# Plot
-# ==========================================
 
 def plot_training(history):
     clear_output(wait=True)
@@ -117,9 +102,7 @@ def plot_training(history):
     plt.show()
 
 
-# ==========================================
-# Train
-# ==========================================
+
 
 def train_baseline():
 
@@ -162,8 +145,8 @@ def train_baseline():
 
         for step, batch in enumerate(pbar):
 
-            mix = batch['mixture'].to(CONFIG['device'])   # [B, 1, L]
-            s_a = batch['s_a'].to(CONFIG['device'])       # [B, 1, L]
+            mix = batch['mixture'].to(CONFIG['device'])  
+            s_a = batch['s_a'].to(CONFIG['device'])       
 
             if is_silent(s_a):
                 continue
@@ -173,11 +156,10 @@ def train_baseline():
 
             optimizer.zero_grad(set_to_none=True)
 
-            # forward 在 autocast 內
             with autocast(device_type='cuda'):
                 pred_wav, pred_mag, mix_mag = model(mix)
 
-            # SI-SDR loss 在 autocast 外，強制 float32
+
             w_mean     = w.mean()
             total_loss = si_sdr_loss(pred_wav, s_a) * w_mean
 
