@@ -36,13 +36,13 @@ class HandSmoothingFilter:
 
 
 def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
-    LEFT_INDICES  = [5, 8, 9, 12, 13, 16, 17, 20]   # 8 個關節（按弦手）
-    RIGHT_INDICES = [0, 2, 4, 5, 9]                  # 5 個關節（撥弦手）
+    LEFT_INDICES  = [5, 8, 9, 12, 13, 16, 17, 20]  
+    RIGHT_INDICES = [0, 2, 4, 5, 9]                  
 
     frame_struct = {
         "A_Left":  np.zeros((8, 7)),
         "A_Right": np.zeros((5, 7)),
-        "valid":   False,          # 此幀是否有有效偵測
+        "valid":   False,          
     }
 
     if not results.multi_hand_landmarks:
@@ -58,7 +58,6 @@ def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
             'wrist_x':   wrist.x,
         })
 
-    # 按 X 座標排序：最左邊的是畫面左側（撥弦手/Right），最右邊是按弦手/Left
     detected_hands = sorted(detected_hands, key=lambda h: h['wrist_x'])
 
     for i, hand_info in enumerate(detected_hands):
@@ -74,7 +73,6 @@ def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
 
         key = f"A_{actual_hand}"
 
-        # 提取相對腕關節的座標（xyz）
         wrist = res_lms.landmark[0]
         raw_coords = np.array([
             [res_lms.landmark[idx].x - wrist.x,
@@ -83,13 +81,12 @@ def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
             for idx in indices
         ])
 
-        # 平滑
+
         try:
             smooth_coords = filters[key].update(raw_coords)
         except Exception:
             smooth_coords = raw_coords
 
-        # 運動差分（dx, dy, dz）
         prev_coords = prev_coords_dict.get(key, np.zeros_like(smooth_coords))
         diff = smooth_coords - prev_coords
 
@@ -99,7 +96,7 @@ def extract_and_struct_data(results, prev_coords_dict, filters, frame_idx=0):
         frame_struct[key] = np.concatenate([smooth_coords, motion_data], axis=1)  # [points, 7]
         prev_coords_dict[key] = smooth_coords
 
-    # 只要至少偵測到一隻手就標記為有效
+
     frame_struct["valid"] = True
     return frame_struct, prev_coords_dict
 
@@ -116,15 +113,14 @@ def draw_tracking_frame(frame, results, frame_idx):
         wrist_x    = res_lms.landmark[0].x
         confidence = res_label.classification[0].score
 
-        # 與 extract_and_struct_data 一致的判斷邏輯
         if wrist_x < 0.4:
             label      = "RIGHT(picking)"
-            color      = (0, 0, 255)    # 紅 = 撥弦手
+            color      = (0, 0, 255)    
         else:
             label      = "LEFT(fretting)"
-            color      = (255, 100, 0)  # 藍 = 按弦手
+            color      = (255, 100, 0)  
 
-        # 繪製骨架（用自訂顏色覆蓋預設樣式）
+
         h, w = annotated.shape[:2]
         for connection in mp_hands.HAND_CONNECTIONS:
             s_idx, e_idx = connection
@@ -134,19 +130,18 @@ def draw_tracking_frame(frame, results, frame_idx):
             ex, ey = int(e.x * w), int(e.y * h)
             cv2.line(annotated, (sx, sy), (ex, ey), color, 2)
 
-        # 繪製關節點
+
         for lm in res_lms.landmark:
             cx, cy = int(lm.x * w), int(lm.y * h)
             cv2.circle(annotated, (cx, cy), 4, color, -1)
 
-        # 腕關節旁標注 label
+
         wrist_px = int(res_lms.landmark[0].x * w)
         wrist_py = int(res_lms.landmark[0].y * h)
         cv2.putText(annotated, f"{label} {confidence:.2f}",
                     (wrist_px + 8, wrist_py - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-    # 右上角幀號
     cv2.putText(annotated, f"F{frame_idx}",
                 (annotated.shape[1] - 80, 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
@@ -188,7 +183,6 @@ def video_audio_process(video_path, audio_path, output_prefix=None,
     prev_coords_dict = {}
     processed_frames = 0
 
-    # ── VideoWriter 初始化（追蹤視覺化）───────────────────────────
     video_writer = None
     if write_tracking_video:
         out_fps    = tracking_fps if tracking_fps else fps
@@ -214,7 +208,6 @@ def video_audio_process(video_path, audio_path, output_prefix=None,
             data_storage[key].append(frame_data[key])
         valid_mask_list.append(frame_data["valid"])
 
-        # ── 寫入追蹤幀 ─────────────────────────────────────────
         if video_writer is not None:
             annotated = draw_tracking_frame(frame, results, processed_frames)
             video_writer.write(annotated)
@@ -232,19 +225,17 @@ def video_audio_process(video_path, audio_path, output_prefix=None,
     valid_ratio = valid_mask.mean() * 100
     print(f"\n✅ 處理完成: {processed_frames}幀, 有效偵測率: {valid_ratio:.1f}%")
 
-    # ── 全局速度歸一化（修正②：在 pre-clip 移除後，這裡才有意義）──
     print("\n📏 全域速度歸一化...")
     for key in ["A_Right", "A_Left"]:
         if data_storage[key]:
-            arr   = np.array(data_storage[key])          # [F, points, 7]
-            v_all = arr[:, :, 6]                          # 速度欄位
+            arr   = np.array(data_storage[key])          
+            v_all = arr[:, :, 6]                          
             max_v = np.max(v_all)
             if max_v > 0:
                 arr[:, :, 6] = np.clip(v_all / max_v, 0.0, 1.0)
                 print(f"   {key}: max_v={max_v:.4f} → 歸一化後 [0,1]")
             data_storage[key] = arr.tolist()
 
-    # ── 資料檢查 ─────────────────────────────────────────────────
     print("\n🔍 資料統計:")
     for key in data_storage:
         arr = np.array(data_storage[key])
@@ -257,11 +248,11 @@ def video_audio_process(video_path, audio_path, output_prefix=None,
             print(f"      x∈[{s[:,0].min():.3f},{s[:,0].max():.3f}] "
                   f"V∈[{s[:,6].min():.3f},{s[:,6].max():.3f}]")
 
-    # ── 裁切音訊 ─────────────────────────────────────────────────
+
     actual_len  = int(processed_frames * (target_sr / fps))
     audio_final = audio_full[:actual_len]
 
-    # ── LUFS 正規化 + RMS 動態範圍計算 ───────────────────────────
+
     print("\n📊 音量正規化與 RMS 檢查...")
     temp_in  = f"{output_prefix}_temp_in.wav"
     temp_out = f"{output_prefix}_temp_out.wav"
@@ -289,7 +280,7 @@ def video_audio_process(video_path, audio_path, output_prefix=None,
         sample_weight = 1.0
     print(f"   Peak-to-RMS: {dynamic_range_db:.2f} dB → weight={sample_weight}")
 
-    # ── 儲存 ─────────────────────────────────────────────────────
+
     sf.write(f"{output_prefix}_A.wav", audio_final, target_sr)
     print(f"\n💾 音訊: {output_prefix}_A.wav")
 
@@ -298,11 +289,10 @@ def video_audio_process(video_path, audio_path, output_prefix=None,
         np.save(f"{output_prefix}_{key}.npy", arr)
         print(f"   {key}: {arr.shape} → {output_prefix}_{key}.npy")
 
-    # 儲存有效幀 mask，供 data_loader 跳過零值幀用
     np.save(f"{output_prefix}_valid.npy", valid_mask)
     print(f"   valid_mask: {valid_mask.shape}, 有效率={valid_ratio:.1f}%")
 
-    # 同時儲存樣本權重為獨立 npy（data_loader 直接 load）
+
     np.save(f"{output_prefix}_weight.npy", np.array(sample_weight))
     print(f"   weight: {sample_weight}")
 
